@@ -1,6 +1,6 @@
 import os
 import zipfile
-import subprocess
+import requests
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -8,11 +8,10 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Variables globales para el RAG
 retriever = None
 agent = None
 
-# ID de tu archivo ZIP directo de Google Drive
+# Enlace directo de tu archivo ZIP subido a GitHub Releases
 ZIP_URL = "https://github.com/Relant-becarios/Marketplace-back/releases/download/v1.0.0/data-20260930T201117Z-1-001.zip"
 
 @asynccontextmanager
@@ -20,28 +19,29 @@ async def lifespan(app: FastAPI):
     global retriever, agent
     print("🚀 Servidor iniciado. Verificando datos y RAG...")
     
-    # 1. Descarga e inicio en segundo plano tras abrir el puerto
     if not os.path.exists("data"):
-        print("Descargando archivo comprimido datos_rag.zip desde Google Drive...")
+        print("Descargando archivo comprimido datos_rag.zip de acceso directo desde GitHub Releases...")
         zip_path = "datos_rag.zip"
-        download_url = f"https://docs.google.com/uc?export=download&confirm=t&id={DRIVE_ZIP_ID}"
         
         try:
-            cmd = ["curl", "-L", "-o", zip_path, download_url]
-            subprocess.run(cmd, check=True)
+            # Descarga directa por streaming
+            with requests.get(ZIP_URL, stream=True) as r:
+                r.raise_for_status()
+                with open(zip_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
             
-            if os.path.exists(zip_path) and os.path.getsize(zip_path) > 1000:
+            if os.path.exists(zip_path) and os.path.getsize(zip_path) > 100000:
                 print("Descomprimiendo archivos en el servidor...")
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                     zip_ref.extractall(".")
                 os.remove(zip_path)
                 print("¡Archivos descomprimidos y listos!")
             else:
-                print("Error: El archivo descargado está vacío o es inválido.")
+                print("Error: El archivo descargado está corrupto o es muy pequeño.")
         except Exception as e:
-            print(f"Error en la descarga o extracción desde Drive: {e}")
+            print(f"Error en la descarga o extracción: {e}")
 
-    # 2. Inicialización del motor RAG
     try:
         from checkpoint_5_1_hybrid_graph_flat import HybridEvaluationRetriever, HybridGraphAgent, make_llm, PDF_DIR
         print("Inicializando Motor RAG...")
@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
         print(f"Error al inicializar el RAG: {e}")
 
     yield
-    print("Servidor apágandose...")
+    print("Servidor apagándose...")
 
 app = FastAPI(title="Relant RAG API", lifespan=lifespan)
 
