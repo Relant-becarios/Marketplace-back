@@ -13,7 +13,7 @@ retriever = None
 agent = None
 
 # ID de tu archivo ZIP directo de Google Drive
-DRIVE_ZIP_ID = "1qOw8X3GZ-28KSTdhdroU9H8JxKjd6s-j"
+ZIP_URL = "https://github.com/Relant-becarios/Marketplace-back/releases/download/v1.0.0/data-20260930T201117Z-1-001.zip"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
