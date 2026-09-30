@@ -1,42 +1,62 @@
 import os
-import shutil
 import zipfile
-import gdown
-from typing import List
+import subprocess
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# 1. DESCARGA Y EXTRAE EL ZIP DESDE GOOGLE DRIVE AL ARRANCAR
+# Variables globales para el RAG
+retriever = None
+agent = None
+
+# ID de tu archivo ZIP directo de Google Drive
 DRIVE_ZIP_ID = "1qOw8X3GZ-28KSTdhdroU9H8JxKjd6s-j"
 
-if not os.path.exists("data"):
-    print("Descargando archivo comprimido datos_rag.zip desde Google Drive...")
-    url = f"https://drive.google.com/uc?id={DRIVE_ZIP_ID}"
-    zip_path = "datos_rag.zip"
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global retriever, agent
+    print("🚀 Servidor iniciado. Verificando datos y RAG...")
     
-    try:
-        gdown.download(url, zip_path, quiet=False)
+    # 1. Descarga e inicio en segundo plano tras abrir el puerto
+    if not os.path.exists("data"):
+        print("Descargando archivo comprimido datos_rag.zip desde Google Drive...")
+        zip_path = "datos_rag.zip"
+        download_url = f"https://docs.google.com/uc?export=download&confirm=t&id={DRIVE_ZIP_ID}"
         
-        if os.path.exists(zip_path):
-            print("Descomprimiendo estructura de archivos en el servidor...")
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(".")
-            os.remove(zip_path)
-            print("¡Archivos descomprimidos y listos!")
-        else:
-            print("Error: No se encontró el archivo ZIP tras la descarga.")
+        try:
+            cmd = ["curl", "-L", "-o", zip_path, download_url]
+            subprocess.run(cmd, check=True)
+            
+            if os.path.exists(zip_path) and os.path.getsize(zip_path) > 1000:
+                print("Descomprimiendo archivos en el servidor...")
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(".")
+                os.remove(zip_path)
+                print("¡Archivos descomprimidos y listos!")
+            else:
+                print("Error: El archivo descargado está vacío o es inválido.")
+        except Exception as e:
+            print(f"Error en la descarga o extracción desde Drive: {e}")
+
+    # 2. Inicialización del motor RAG
+    try:
+        from checkpoint_5_1_hybrid_graph_flat import HybridEvaluationRetriever, HybridGraphAgent, make_llm, PDF_DIR
+        print("Inicializando Motor RAG...")
+        llm = make_llm()
+        retriever = HybridEvaluationRetriever(pdf_dir=PDF_DIR, top_k=10)
+        agent = HybridGraphAgent(llm, retriever)
+        print("✅ Motor RAG cargado y listo para consultas.")
     except Exception as e:
-        print(f"Error en la descarga o extracción desde Drive: {e}")
+        print(f"Error al inicializar el RAG: {e}")
 
-# Importamos tu motor RAG tras garantizar que la carpeta data exista
-from checkpoint_5_1_hybrid_graph_flat import HybridEvaluationRetriever, HybridGraphAgent, make_llm, PDF_DIR
+    yield
+    print("Servidor apágandose...")
 
-app = FastAPI(title="Relant RAG API")
+app = FastAPI(title="Relant RAG API", lifespan=lifespan)
 
-# Configuración de CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,14 +65,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Inicializar el motor RAG
-print("Inicializando Motor RAG...")
-llm = make_llm()
-retriever = HybridEvaluationRetriever(pdf_dir=PDF_DIR, top_k=10)
-agent = HybridGraphAgent(llm, retriever)
-print("Motor RAG listo.")
-
-# --- RUTAS DE LA INTERFAZ HTML Y API ---
+# --- RUTAS DE LA API ---
 
 @app.get("/")
 @app.get("/asistente")
@@ -67,6 +80,8 @@ class QuestionRequest(BaseModel):
 
 @app.post("/api/ask")
 async def ask_question(req: QuestionRequest):
+    if agent is None:
+        return {"ok": False, "error": "El motor RAG aún se está inicializando en el servidor. Por favor reintenta en un momento."}
     try:
         result = agent.run(req.question)
         return {
@@ -81,36 +96,6 @@ async def ask_question(req: QuestionRequest):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-@app.post("/api/upload")
-async def upload_files(files: List[UploadFile] = File(...)):
-    allowed_extensions = {
-        ".pdf", ".csv", ".xlsx", ".xls", ".pptx", ".ppt",
-        ".docx", ".doc", ".png", ".jpg", ".jpeg", ".txt", ".md"
-    }
-    saved_files = []
-    
-    os.makedirs(PDF_DIR, exist_ok=True)
-    
-    for file in files:
-        ext = Path(file.filename).suffix.lower()
-        if ext not in allowed_extensions:
-            continue
-            
-        target_dir = Path(PDF_DIR)
-        if ext in {".png", ".jpg", ".jpeg"}:
-            target_dir = target_dir / "drawings"
-            os.makedirs(target_dir, exist_ok=True)
-            
-        file_path = target_dir / file.filename
-        
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-            
-        saved_files.append(file.filename)
-        
-    retriever._sync_and_index()
-    return {"message": f"{len(saved_files)} archivos subidos e indexados con éxito.", "files": saved_files}
-
 @app.get("/api/health")
 async def health_check():
-    return {"ok": True, "status": "online"}
+    return {"ok": True, "status": "online" if agent is not None else "initializing"}
