@@ -40,11 +40,9 @@ Puts the pieces together, without dropping anything that worked:
       only the new CSVs / drawings are processed on the next run. ***
 
 Setup: pip install langchain-openai langchain-core langchain-chroma langchain-text-splitters
-       pypdf rank-bm25 python-dotenv requests langgraph beautifulsoup4 pillow
+       pypdf rank-bm25 python-dotenv requests langgraph beautifulsoup4 pillow pandas openpyxl python-pptx
        OPENROUTER_API_KEY in a .env next to this script.
 """
-
-# # Checkpoint 5.1 — hybrid retrieval + agentic graph + external tools + document tools
 
 from __future__ import annotations
 
@@ -77,47 +75,44 @@ from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_chroma import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langgraph.graph import StateGraph, END   # END from langgraph, not tkinter
+from langgraph.graph import StateGraph, END
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 LLM_MODEL = "openai/gpt-5.4-mini"
-EMBED_MODEL = "text-embedding-3-small"   # kept as in your working 3.1; "openai/..." also works
+EMBED_MODEL = "text-embedding-3-small"
 TEMPERATURE = 0.2
-MAX_STEPS = 5                            # safety cap on agent loops
-INTERACTIVE = True                      # True => clarify() prompts you at the console
+MAX_STEPS = 5
+INTERACTIVE = True
 
-# --- hybrid retriever config (from 3.1) ---
 TOP_K = 10
 CANDIDATE_POOL = 20
 VECTOR_WEIGHT = 0.4
-# Own store for the RECURSIVE index, so it never mixes IDs with a "flat" run's DB.
 CHROMA_DIR = os.path.abspath("./chroma_db_eval_recursive")
 MANIFEST_CACHE_FILE = "./pdf_manifest_eval_recursive_cache.pkl"
 PDF_DIR = r"./data"
 
-# Read files from PDF_DIR and every subfolder underneath it. Set False for top-level only.
 RECURSIVE = True
 
-# File types the indexer will read. PDFs go through pypdf; .txt/.md are read as plain text.
 PDF_EXTS = (".pdf",)
 TEXT_EXTS = (".txt", ".md")
-# --- ADDED (from 5.7): CSV tables + drawings ---
 CSV_EXTS = (".csv",)
 IMAGE_EXTS = (".png", ".jpg", ".jpeg")
-IMAGE_SUBDIRS = ("drawings",)         # images are indexed only inside these subfolders
+EXCEL_EXTS = (".xlsx", ".xls")
+PPTX_EXTS = (".pptx",)
+
+IMAGE_SUBDIRS = ("drawings",)
 CSV_ROWS_PER_CHUNK = 1
-VECTOR_MAX_TABLE_ROWS = 2000          # bigger CSV -> rows BM25-only (saves embeddings)
-DESCRIBE_IMAGES = True                # vision model describes each drawing ONCE
+VECTOR_MAX_TABLE_ROWS = 2000
+DESCRIBE_IMAGES = True
 VISION_MODEL = LLM_MODEL
 VISION_WORKERS = 4
 IMAGE_MAX_SIDE = 1600
 
-# --- ADDED (from 5.7): document-level tools ---
-LIST_DOCS_MAX = 25            # catalog lines returned per list_documents call
-READ_DOC_MAX_CHARS = 8000     # characters returned per read_document part
-READ_TABLE_MAX_ROWS = 60      # rows shown when read_document opens a CSV table
-TABLE_LOOKUP_MAX_ROWS = 15    # rows returned per table_lookup call
-MANUFACTURERS = (             # display name, keys searched in file path / first page
+LIST_DOCS_MAX = 25
+READ_DOC_MAX_CHARS = 8000
+READ_TABLE_MAX_ROWS = 60
+TABLE_LOOKUP_MAX_ROWS = 15
+MANUFACTURERS = (
     ("ABNOX", ("abnox",)),
     ("Schütze", ("schutze", "alfred schutze")),
     ("Soma", ("soma",)),
@@ -129,7 +124,6 @@ LOG_PATH = Path.cwd() / "checkpoint_5_1_hybrid_graph.log"
 SCENARIO = ("data folder with PDFs + crawled Abnox web pages + CSV tables + drawings, "
             "hybrid retrieval, agentic graph, external + document tools")
 
-
 if sys.version_info >= (3, 13):
     print(
         f"[warning] Running on Python {sys.version_info.major}.{sys.version_info.minor}. "
@@ -137,7 +131,6 @@ if sys.version_info >= (3, 13):
         "run: pip install -U chromadb langchain-chroma  (or use a 3.12 venv).\n"
     )
 
-# --- system prompts ---
 TOOL_SYSTEM = (
     "You are a research-paper navigator agent over a HYBRID (BM25 + vector) search index "
     "of the user's collection (PDFs, web pages, CSV tables and technical drawings). "
@@ -201,7 +194,6 @@ IMAGE_PROMPT = (
     "Only write what you can actually read; write 'illegible' instead of guessing."
 )
 
-
 def check_api_key() -> str:
     load_dotenv()
     key = os.getenv("OPENROUTER_API_KEY")
@@ -209,17 +201,14 @@ def check_api_key() -> str:
         raise RuntimeError("OPENROUTER_API_KEY not set. Put it in a .env next to this script.")
     return key
 
-
 def make_llm(temperature: float = TEMPERATURE, model: str = LLM_MODEL) -> ChatOpenAI:
     return ChatOpenAI(model=model, temperature=temperature,
                       api_key=check_api_key(), base_url=OPENROUTER_BASE_URL)
-
 
 def log(label: str, text: str) -> None:
     ts = datetime.now().isoformat(timespec="seconds")
     with LOG_PATH.open("a", encoding="utf-8") as fh:
         fh.write(f"[{ts}] {label}\n{text}\n{'-' * 72}\n")
-
 
 def _parse_json(raw: str) -> dict:
     raw = raw.strip()
@@ -228,21 +217,15 @@ def _parse_json(raw: str) -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", raw, re.S)       # JSON surrounded by text
+        m = re.search(r"\{.*\}", raw, re.S)
         if m:
             return json.loads(m.group(0))
         raise
 
-
 def simple_tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
-
-# ## ADDED (from 5.7) — CSV reading, codes, image loading
-
 def read_csv_table(path: str | Path) -> tuple[list[str], list[list[str]], list[str]]:
-    """Excel-exported CSV -> (headers, rows, preamble). Detects encoding, delimiter and
-    skips title rows above the real header."""
     raw = Path(path).read_bytes()
     text = ""
     for enc in ("utf-8-sig", "cp1252", "latin-1"):
@@ -283,20 +266,15 @@ def read_csv_table(path: str | Path) -> tuple[list[str], list[list[str]], list[s
     data = [r + [""] * (width - len(r)) for r in rows[hdr_i + 1:]]
     return headers, data, preamble
 
-
 _CODE_RE = re.compile(r"\b[A-Za-z]{1,6}-?\d{1,5}[A-Za-z0-9\-]*\b|\b\d{5,}\b")
-
 
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
-
 def extract_codes(text: str) -> set[str]:
     return {c for c in (_norm(m) for m in _CODE_RE.findall(text or "")) if len(c) >= 3}
 
-
 def image_data_url(path: str, max_side: int = IMAGE_MAX_SIDE) -> str:
-    """Drawing -> data URL for the vision model (resized with Pillow when available)."""
     try:
         from PIL import Image
         Image.MAX_IMAGE_PIXELS = None
@@ -311,9 +289,6 @@ def image_data_url(path: str, max_side: int = IMAGE_MAX_SIDE) -> str:
         data = Path(path).read_bytes()
         mime = "image/png" if path.lower().endswith(".png") else "image/jpeg"
     return f"data:{mime};base64,{base64.b64encode(data).decode()}"
-
-
-# ## ADDED (from 5.7) — document catalog helpers (list_documents / read_document)
 
 DOC_TYPE_LABEL = {"manual": "manual", "datasheet": "datasheet", "table": "CSV table",
                   "drawing": "drawing", "catalogue": "catalogue",
@@ -356,29 +331,22 @@ _TYPE_ALIASES = {
     "web": "web", "web page": "web", "document": "document", "pdf": "document",
 }
 
-
 def _fold(s: str) -> str:
-    """lower-case, German umlauts -> ae/oe/ue, accents removed, punctuation -> spaces."""
     s = (s or "").lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue") \
         .replace("ß", "ss")
     s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
     return " ".join(re.sub(r"[^a-z0-9]+", " ", s).split())
 
-
 def _mkey(s: str) -> str:
-    """Loose key for names: 'Schütze', 'Schuetze' and 'schutze' all give 'schutze'."""
     return _fold(s).replace("ue", "u").replace(" ", "")
 
-
 def _raw_codes(text: str) -> dict[str, str]:
-    """normalized code -> first spelling seen (e.g. 'vdv25' -> 'VDV-25')."""
     out: dict[str, str] = {}
     for m in _CODE_RE.findall(text or ""):
         n = _norm(m)
         if len(n) >= 3 and n not in out:
             out[n] = m
     return out
-
 
 def _canon_type(s: str) -> str:
     f = _fold(s).replace("_", " ")
@@ -391,7 +359,6 @@ def _canon_type(s: str) -> str:
             return v
     return f
 
-
 def _guess_manufacturer(rel: str, head: str) -> str:
     name = " " + _fold(rel).replace("ue", "u") + " "
     text = " " + _fold(head[:2500]).replace("ue", "u") + " "
@@ -402,7 +369,6 @@ def _guess_manufacturer(rel: str, head: str) -> str:
                     return disp
     parts = rel.split("/")
     return parts[0] if len(parts) > 1 else ""
-
 
 def _guess_doc_type(ext: str, rel: str, head: str) -> str:
     if ext in IMAGE_EXTS:
@@ -420,7 +386,6 @@ def _guess_doc_type(ext: str, rel: str, head: str) -> str:
         if any(w in text for w in words):
             return t
     return "document"
-
 
 def _guess_title(kind: str, rel: str, chunks: list[dict]) -> str:
     stem = Path(rel).stem
@@ -441,9 +406,7 @@ def _guess_title(kind: str, rel: str, chunks: list[dict]) -> str:
             return t[:110]
     return stem
 
-
 def build_catalog_entry(path: str, rel: str, chunks: list[dict]) -> dict:
-    """One catalog line per file, built from its chunks (no API calls)."""
     ext = Path(path).suffix.lower()
     head = "\n".join(c["text"] for c in chunks[:3])
     kind = _guess_doc_type(ext, rel, head)
@@ -462,7 +425,6 @@ def build_catalog_entry(path: str, rel: str, chunks: list[dict]) -> dict:
         entry["snippet"] = " ".join(chunks[0]["text"].split())[:180]
     return entry
 
-
 def format_catalog_entry(e: dict) -> str:
     line = (f"- {e['rel']} | {DOC_TYPE_LABEL.get(e['type'], e['type'])} | "
             f"{e['manufacturer'] or '?'} | {e['title'][:100]}")
@@ -475,9 +437,7 @@ def format_catalog_entry(e: dict) -> str:
         line += f"\n    {e['snippet'][:160]}"
     return line
 
-
 def merge_chunks(texts: list[str]) -> str:
-    """Join consecutive chunks of one file, removing the splitter's overlap."""
     out = ""
     for t in texts:
         t = t or ""
@@ -496,17 +456,7 @@ def merge_chunks(texts: list[str]) -> str:
         out = out + t[cut:] if cut > 0 else out + "\n" + t
     return out
 
-
-# ## The 3.1 hybrid retriever (engine unchanged — recursive discovery + text/CSV/drawings)
-
 class HybridEvaluationRetriever:
-    """Retriever híbrido que combina BM25 y ChromaDB con caché automático (de 3.1).
-
-    MODIFIED: descubre los archivos de forma recursiva e indexa PDFs, texto (.txt/.md),
-    tablas CSV y dibujos (.png/.jpg en subcarpetas 'drawings'). Además expone el catálogo
-    de documentos, la lectura de un archivo completo y la búsqueda exacta en tablas.
-    """
-
     def __init__(self, pdf_dir: str, top_k: int = 3, recursive: bool = RECURSIVE,
                  vision_llm=None):
         self._pdf_dir = Path(pdf_dir)
@@ -519,11 +469,11 @@ class HybridEvaluationRetriever:
         self._chunks: dict[str, dict] = {}
         self._chunk_ids: list[str] = []
         self._bm25 = None
-        self._kind_idx: dict[str, list[int]] = {}      # kind -> chunk indices
-        self._catalog: dict[str, dict] = {}            # rel -> catalog entry
-        self._file_idx: dict[str, list[int]] = {}      # rel -> chunk indices (in order)
-        self._chunk_rel: list[str] = []                # chunk index -> rel
-        self._table_cache: dict[str, tuple] = {}       # csv path -> parsed rows
+        self._kind_idx: dict[str, list[int]] = {}
+        self._catalog: dict[str, dict] = {}
+        self._file_idx: dict[str, list[int]] = {}
+        self._chunk_rel: list[str] = []
+        self._table_cache: dict[str, tuple] = {}
         self.embeddings = OpenAIEmbeddings(
             model=EMBED_MODEL, api_key=check_api_key(), base_url=OPENROUTER_BASE_URL,
         )
@@ -531,7 +481,6 @@ class HybridEvaluationRetriever:
         self.vector_db = Chroma(persist_directory=CHROMA_DIR, embedding_function=self.embeddings)
         self._sync_and_index()
 
-    # ---------- discovery ----------
     def _image_allowed(self, f: Path) -> bool:
         if not IMAGE_SUBDIRS:
             return True
@@ -548,17 +497,15 @@ class HybridEvaluationRetriever:
                    for e in IMAGE_EXTS)
 
     def _iter_pdfs(self):
-        """Yield every indexable file (PDF, .txt/.md, .csv, drawings) under the corpus dir.
-        Recursive when self._recursive."""
         if not self._pdf_dir.exists():
             print(f"Warning: Directory '{self._pdf_dir}' does not exist.")
             return
         globber = self._pdf_dir.rglob if self._recursive else self._pdf_dir.glob
-        docs = PDF_EXTS + TEXT_EXTS + CSV_EXTS
+        docs = PDF_EXTS + TEXT_EXTS + CSV_EXTS + EXCEL_EXTS + PPTX_EXTS
         seen = set()
         for f in sorted(globber("*")):
             try:
-                if not f.is_file() or f.name.startswith("~$"):   # skip Office lock files
+                if not f.is_file() or f.name.startswith("~$"):
                     continue
             except OSError:
                 continue
@@ -566,7 +513,6 @@ class HybridEvaluationRetriever:
             if ext in IMAGE_EXTS:
                 ok = self._image_allowed(f)
             elif ext in docs:
-                # a .txt next to a drawing with the same name is its "notes" sidecar
                 ok = not (ext == ".txt" and self._has_sibling_image(f))
             else:
                 ok = False
@@ -576,19 +522,31 @@ class HybridEvaluationRetriever:
                 yield f
 
     def _rel_name(self, path: str) -> str:
-        """Path relative to the corpus root (posix style) so files in different subfolders
-        with the same basename don't collide as ids/sources. Falls back to the basename."""
         try:
             return Path(path).relative_to(self._pdf_dir).as_posix()
         except ValueError:
             return Path(path).name
 
-    # ---------- per-type chunking ----------
     def _extract_text(self, path: str) -> str:
-        """PDF -> pypdf; everything else (.txt/.md) -> read as UTF-8 text."""
-        if path.lower().endswith(".pdf"):
+        """PDF -> pypdf; PPTX -> python-pptx; Excel -> pandas; texto -> UTF-8."""
+        ext = path.lower()
+        if ext.endswith(".pdf"):
             reader = PdfReader(path)
             return " ".join(pg.extract_text() for pg in reader.pages if pg.extract_text())
+        elif ext.endswith(".pptx"):
+            try:
+                from pptx import Presentation
+                prs = Presentation(path)
+                return "\n".join(shape.text for slide in prs.slides for shape in slide.shapes if hasattr(shape, "text"))
+            except Exception as e:
+                return f"Error leyendo PPTX: {e}"
+        elif ext.endswith((".xlsx", ".xls")):
+            try:
+                import pandas as pd
+                df = pd.read_excel(path)
+                return df.to_csv(index=False) # Convierte el Excel a texto CSV plano para el RAG
+            except Exception as e:
+                return f"Error leyendo Excel: {e}"
         return Path(path).read_text(encoding="utf-8", errors="ignore")
 
     def _text_chunks(self, path: str, rel: str, splitter) -> list[dict]:
@@ -614,7 +572,6 @@ class HybridEvaluationRetriever:
         return chunks
 
     def _describe_image(self, path: str) -> str:
-        """One vision call. A failure -> indexed by name now, described on the next run."""
         if not DESCRIBE_IMAGES or self._vision_llm is None or not self._vision_ok:
             if DESCRIBE_IMAGES and self._vision_llm is not None:
                 self._retry_later.add(path)
@@ -671,7 +628,6 @@ class HybridEvaluationRetriever:
             return self._image_chunks(path, rel)
         return self._text_chunks(path, rel, splitter)
 
-    # ---------- sync ----------
     def _sync_and_index(self) -> None:
         scope = "recursively (incl. subfolders)" if self._recursive else "(top level only)"
         print(f"Syncing files in {self._pdf_dir} {scope}...")
@@ -690,7 +646,6 @@ class HybridEvaluationRetriever:
         print(f"Found {len(current_files)} indexable file(s): "
               + ", ".join(f"{v} {k}" for k, v in sorted(kinds.items())))
 
-        # mtime == -1 marks a drawing whose description failed -> retried now
         new_or_modified = [p for p, m in current_files.items()
                            if p not in cached_manifest or cached_manifest[p]["mtime"] != m]
         deleted_files = [p for p in cached_manifest if p not in current_files]
@@ -714,7 +669,7 @@ class HybridEvaluationRetriever:
                 to_embed = chunk_dicts
                 if (Path(path).suffix.lower() in CSV_EXTS
                         and len(chunk_dicts) - 1 > VECTOR_MAX_TABLE_ROWS):
-                    to_embed = chunk_dicts[:1]    # big table: overview embedded, rows BM25-only
+                    to_embed = chunk_dicts[:1]
                     print(f"  {self._rel_name(path)}: {len(chunk_dicts) - 1} rows "
                           "(big table: rows BM25-only)")
                 new_docs_to_embed.extend(Document(
@@ -730,7 +685,6 @@ class HybridEvaluationRetriever:
                 batch_size = 5000
                 for i in range(0, len(new_docs_to_embed), batch_size):
                     batch = new_docs_to_embed[i:i + batch_size]
-                    # ids = chunk ids -> a re-indexed file overwrites its old vectors
                     self.vector_db.add_documents(
                         batch, ids=[d.metadata["chunk_id"] for d in batch])
             with open(MANIFEST_CACHE_FILE, "wb") as f:
@@ -745,7 +699,6 @@ class HybridEvaluationRetriever:
         self._build_search_index(cached_manifest)
 
     def _build_search_index(self, manifest: dict) -> None:
-        """BM25 + chunk table + document catalog, from the manifest (no API calls)."""
         tokenized_corpus = []
         self._chunks, self._chunk_ids, self._kind_idx = {}, [], {}
         self._catalog, self._file_idx, self._chunk_rel = {}, {}, []
@@ -754,7 +707,7 @@ class HybridEvaluationRetriever:
             rel = item.get("rel") or (item["chunks"][0]["source"] if item.get("chunks")
                                       else self._rel_name(path))
             for chunk in item["chunks"]:
-                chunk.setdefault("kind", "text")     # chunks indexed by the old 5.1
+                chunk.setdefault("kind", "text")
                 self._kind_idx.setdefault(chunk["kind"], []).append(len(self._chunk_ids))
                 self._file_idx.setdefault(rel, []).append(len(self._chunk_ids))
                 self._chunk_rel.append(rel)
@@ -763,7 +716,7 @@ class HybridEvaluationRetriever:
                 tokenized_corpus.append(simple_tokenize(chunk["text"]))
             try:
                 self._catalog[rel] = build_catalog_entry(path, rel, item["chunks"])
-            except Exception as e:           # a catalog problem must never block the index
+            except Exception as e:
                 print(f"  (catalog: could not describe {rel}: {e})")
         if tokenized_corpus:
             self._bm25 = BM25Okapi(tokenized_corpus)
@@ -774,7 +727,6 @@ class HybridEvaluationRetriever:
         else:
             self._bm25 = None
 
-    # ---------- search ----------
     @staticmethod
     def _normalize(scores: dict[str, float]) -> dict[str, float]:
         if not scores:
@@ -787,7 +739,6 @@ class HybridEvaluationRetriever:
 
     def retrieve(self, query: str, top_k: int | None = None,
                  kinds: set[str] | None = None) -> list[dict]:
-        """Hybrid search; `kinds` restricts to chunk types ({"image"} = drawings only)."""
         if not self._chunks or self._bm25 is None or not (query or "").strip():
             return []
         k = top_k or self._top_k
@@ -808,22 +759,19 @@ class HybridEvaluationRetriever:
         bm25_scores = {self._chunk_ids[i]: raw[i] for i in top if raw[i] > 0}
 
         vn, bn = self._normalize(vec_scores), self._normalize(bm25_scores)
-        # Keep only chunk_ids that still exist in the CURRENT corpus (and of the wanted kind).
         combined = {c: VECTOR_WEIGHT * vn.get(c, 0.0) + (1 - VECTOR_WEIGHT) * bn.get(c, 0.0)
                     for c in (set(vn) | set(bn))
                     if c in self._chunks and (not kinds or self._chunks[c]["kind"] in kinds)}
         ranked = sorted(combined.items(), key=lambda x: x[1], reverse=True)[:k]
         return [self._chunks[c] for c, _ in ranked]
 
-    # ---------- ADDED (from 5.7): document-level access ----------
     def resolve_doc(self, raw: str) -> tuple[str | None, list[str]]:
-        """File name, partial name, title or chunk id -> (rel of one file, other candidates)."""
         r = str(raw or "").strip().strip("[]\"'` ").strip()
         if not r or not self._catalog:
             return None, []
         if r in self._catalog:
             return r, []
-        if r in self._chunks:                                  # a chunk id
+        if r in self._chunks:
             return self._chunks[r].get("source"), []
         m = re.match(r"(.+?)_(?:chunk\d+|row\d+|table|drawing)$", r)
         if m and m.group(1) in self._catalog:
@@ -850,7 +798,6 @@ class HybridEvaluationRetriever:
         return (hits[0], hits[1:]) if hits else (None, [])
 
     def _file_bm25(self, query: str) -> dict[str, float]:
-        """Best BM25 chunk score per file for `query`."""
         best: dict[str, float] = {}
         if self._bm25 is None or not query.strip():
             return best
@@ -864,7 +811,6 @@ class HybridEvaluationRetriever:
 
     def list_documents(self, keyword: str = "", manufacturer: str = "", doc_type: str = "",
                        limit: int = LIST_DOCS_MAX) -> tuple[list[dict], int]:
-        """Catalog lines: manufacturer / doc_type filter; keyword ranks (codes, title, text)."""
         items = list(self._catalog.values())
         if manufacturer:
             mk = _mkey(manufacturer)
@@ -899,8 +845,6 @@ class HybridEvaluationRetriever:
 
     def read_document(self, doc: str, part: int = 1, query: str = "",
                       max_chars: int = READ_DOC_MAX_CHARS) -> str:
-        """The content of ONE file, in order, in parts of max_chars (or its passages most
-        relevant to `query`)."""
         rel, alts = self.resolve_doc(doc)
         if not rel or rel not in self._catalog:
             sugg = ", ".join(alts) if alts else ""
@@ -953,7 +897,6 @@ class HybridEvaluationRetriever:
         return text
 
     def _table_rows(self, path: str) -> tuple[list[str], list[list[str]], list[list[str]]]:
-        """(headers, rows, normalized cells) of one CSV, cached until the file changes."""
         m = os.path.getmtime(path)
         got = self._table_cache.get(path)
         if got and got[0] == m:
@@ -965,7 +908,6 @@ class HybridEvaluationRetriever:
 
     def table_lookup(self, code: str, columns: str = "", table: str = "",
                      limit: int = TABLE_LOOKUP_MAX_ROWS) -> str:
-        """Exact search of article / model codes in every CSV table."""
         codes = [c.strip() for c in re.split(r"[,;]+", str(code or "")) if c.strip()]
         codes = [c for c in codes if len(_norm(c)) >= 2]
         if not codes:
@@ -978,7 +920,7 @@ class HybridEvaluationRetriever:
             return ("No CSV table" + (f" matches '{table}'" if table else " in the index")
                     + ". Use semantic_search instead.")
         wanted_cols = [c.strip() for c in re.split(r"[,;]+", str(columns or "")) if c.strip()]
-        found: list[tuple[int, str, int, str]] = []    # (score, rel, row index, code)
+        found: list[tuple[int, str, int, str]] = []
         cache: dict[str, tuple[list[str], list[list[str]]]] = {}
         problems = []
         for e in tables:
@@ -1043,27 +985,21 @@ class HybridEvaluationRetriever:
         return head + "\n" + "\n".join(lines) + col_note
 
 
-# ## Tools — semantic_search is the hybrid retriever; the rest are external / document tools
-
 def _format_docs(docs: list[dict], n: int = 6, width: int = 400) -> str:
     if not docs:
         return "No matching documents in the local corpus."
     out = []
     for d in docs[:n]:
-        w = max(width, 900) if d.get("kind") == "image" else width   # keep the parts list
+        w = max(width, 900) if d.get("kind") == "image" else width
         out.append(f"[{d['id']}] {d['text'][:w]}")
     return "\n".join(out)
 
 
 def make_tools(retriever: HybridEvaluationRetriever) -> dict:
-    """Build the tool registry. semantic_search closes over the hybrid retriever."""
-
     def tool_semantic_search(query: str = "", **_) -> str:
-        """INTERNAL: hybrid (BM25 + vector) search over the indexed collection."""
         return _format_docs(retriever.retrieve(str(query)))
 
     def tool_drawing_search(query: str = "", **_) -> str:
-        """INTERNAL: hybrid search over the drawings (exploded views) only."""
         if not retriever._kind_idx.get("image"):
             return ("No drawings are indexed (put .png/.jpg files in a 'drawings' subfolder "
                     "of the data folder). Use semantic_search instead.")
@@ -1076,7 +1012,6 @@ def make_tools(retriever: HybridEvaluationRetriever) -> dict:
 
     def tool_list_documents(keyword: str = "", manufacturer: str = "", doc_type: str = "",
                             limit: int = LIST_DOCS_MAX, **kw) -> str:
-        """INTERNAL: catalog of the collection (one line per file)."""
         keyword = _txt(keyword or kw.get("query") or kw.get("topic") or kw.get("code"))
         doc_type = _txt(doc_type or kw.get("type") or kw.get("kind"))
         manufacturer = _txt(manufacturer or kw.get("brand") or kw.get("maker"))
@@ -1093,7 +1028,6 @@ def make_tools(retriever: HybridEvaluationRetriever) -> dict:
                                or "(no document matched — try fewer filters)")
 
     def tool_read_document(doc: str = "", part: int = 1, query: str = "", **kw) -> str:
-        """INTERNAL: read one whole file (in parts, or its most relevant passages)."""
         doc = doc or kw.get("document") or kw.get("file") or kw.get("doc_id") \
             or kw.get("doc_ids") or kw.get("name") or kw.get("id") or ""
         docs = [str(d) for d in doc] if isinstance(doc, (list, tuple)) else [str(doc)]
@@ -1109,7 +1043,6 @@ def make_tools(retriever: HybridEvaluationRetriever) -> dict:
                                                    max_chars=budget) for d in docs)
 
     def tool_table_lookup(code: str = "", columns: str = "", table: str = "", **kw) -> str:
-        """INTERNAL: exact article / model code lookup in the CSV tables."""
         code = _txt(code or kw.get("codes") or kw.get("article") or kw.get("part_number")
                     or kw.get("model") or kw.get("query"))
         columns = _txt(columns or kw.get("column") or kw.get("fields"))
@@ -1117,7 +1050,6 @@ def make_tools(retriever: HybridEvaluationRetriever) -> dict:
         return retriever.table_lookup(code, columns=columns, table=table)
 
     def tool_web_paper_search(query: str = "", k: int = 3, **_) -> str:
-        """EXTERNAL: Semantic Scholar — papers NOT in the local collection."""
         try:
             r = requests.get(
                 "https://api.semanticscholar.org/graph/v1/paper/search",
@@ -1138,7 +1070,6 @@ def make_tools(retriever: HybridEvaluationRetriever) -> dict:
         )
 
     def tool_calculator(expression: str = "", **_) -> str:
-        """EXTERNAL: safe arithmetic (no eval)."""
         ops = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
                ast.Div: op.truediv, ast.Pow: op.pow, ast.USub: op.neg}
 
@@ -1157,7 +1088,6 @@ def make_tools(retriever: HybridEvaluationRetriever) -> dict:
             return f"calc error: {e}"
 
     def tool_clarify(question: str = "", **_) -> str:
-        """HUMAN-IN-THE-LOOP: ask the user (skipped when non-interactive)."""
         if not INTERACTIVE:
             return "(clarify skipped — non-interactive; assume the general interpretation)"
         return input(f"\n[agent asks] {question}\n> ")
@@ -1173,15 +1103,10 @@ def make_tools(retriever: HybridEvaluationRetriever) -> dict:
         "clarify": tool_clarify,
     }
 
-
-# main argument of each tool, used when the model sends args as a plain string
 _TOOL_MAIN_ARG = {"semantic_search": "query", "drawing_search": "query",
                   "list_documents": "keyword", "read_document": "doc", "table_lookup": "code",
                   "web_paper_search": "query", "calculator": "expression",
                   "clarify": "question", "answer": "text"}
-
-
-# ## choose_tool — the decision function (kept from checkpoint_5_1.py)
 
 def choose_tool(llm: ChatOpenAI, question: str, transcript: str) -> dict:
     user = (f"Question: {question}\n\nSteps so far:\n{transcript or '(none)'}\n\n"
@@ -1196,14 +1121,9 @@ def choose_tool(llm: ChatOpenAI, question: str, transcript: str) -> dict:
                 "reasoning": "parse-fail"}
     tool = str(d.get("tool") or "answer")
     args = d.get("args") or {}
-    if not isinstance(args, dict):                 # e.g. "args": "VDV-25"
+    if not isinstance(args, dict):
         args = {_TOOL_MAIN_ARG.get(tool, "query"): str(args)}
     return {"tool": tool, "args": args, "reasoning": str(d.get("reasoning", ""))}
-
-
-# ## The agent as a LangGraph
-#     (entry) -> decide -> [act -> decide]* -> answer -> END
-# decide picks the tool; the conditional edge routes to act (loop) or answer (stop).
 
 class AgentState(TypedDict):
     question: str
@@ -1211,7 +1131,6 @@ class AgentState(TypedDict):
     iterations: int
     decision: dict
     answer: str
-
 
 class HybridGraphAgent:
     def __init__(self, llm: ChatOpenAI, retriever: HybridEvaluationRetriever,
@@ -1221,14 +1140,12 @@ class HybridGraphAgent:
         self.max_steps = max_steps
         self.app = self._build_graph()
 
-    # NODE: decide — call choose_tool, record the decision
     def _decide_node(self, state: AgentState) -> dict:
         d = choose_tool(self.llm, state["question"], "\n".join(state["transcript"]))
         line = f"[decide] {d['tool']}({d['args']}) :: {d['reasoning'][:70]}"
         print(f"  step {state['iterations'] + 1}: {line}")
         return {"decision": d, "transcript": state["transcript"] + [line]}
 
-    # NODE: act — run the chosen tool, append the observation
     def _act_node(self, state: AgentState) -> dict:
         d = state["decision"]
         tool, args = d["tool"], d["args"]
@@ -1240,7 +1157,6 @@ class HybridGraphAgent:
         return {"transcript": state["transcript"] + [f"[{tool} {args}] -> {obs}"],
                 "iterations": state["iterations"] + 1}
 
-    # NODE: answer — use the model's answer text, or synthesize from the notes
     def _answer_node(self, state: AgentState) -> dict:
         d = state["decision"]
         text = str((d.get("args") or {}).get("text", ""))
@@ -1251,14 +1167,13 @@ class HybridGraphAgent:
                                HumanMessage(content=f"Notes:\n{ctx}\n\nQuestion: {state['question']}")]).content
         return {"answer": ans}
 
-    # CONDITIONAL EDGE: the decision -> a path
     def _route(self, state: AgentState) -> str:
         d = state["decision"]
         if d["tool"] == "answer":
-            return "answer"                              # enough info -> stop
+            return "answer"
         if state["iterations"] >= self.max_steps:
-            return "answer"                              # safety cap -> stop
-        return "act"                                     # not enough -> run tool, loop
+            return "answer"
+        return "act"
 
     def _build_graph(self):
         g = StateGraph(AgentState)
@@ -1267,7 +1182,7 @@ class HybridGraphAgent:
         g.add_node("answer", self._answer_node)
         g.set_entry_point("decide")
         g.add_conditional_edges("decide", self._route, {"act": "act", "answer": "answer"})
-        g.add_edge("act", "decide")                      # loop back to decide
+        g.add_edge("act", "decide")
         g.add_edge("answer", END)
         return g.compile()
 
@@ -1276,29 +1191,22 @@ class HybridGraphAgent:
                             "decision": {}, "answer": ""}
         return self.app.invoke(init)
 
-
-# ## Baseline (the 3.1 fixed single-pass hybrid pipeline)
-
 def fixed_pipeline_answer(llm: ChatOpenAI, retriever: HybridEvaluationRetriever, question: str) -> str:
     docs = retriever.retrieve(question)
     context = "\n\n".join(f"[{d['id']}] {d['text']}" for d in docs) or "(no documents retrieved)"
     return llm.invoke([SystemMessage(content=FIXED_SYSTEM),
                        HumanMessage(content=f"Documents:\n{context}\n\nQuestion: {question}")]).content
 
-
-# ## Step 2 — agent design (for the worksheet)
-
 EXAMPLE_PROMPTS = [
-    "What is the VDV-25 dispensing valve and what is it used for?",          # direct fact
-    "What are the differences between the VDV-25 and another valve model?",  # multi-step search
-    "What is the operating pressure range of the VDV-25, and its midpoint?",  # search + calculator
-    "Show me the exploded view of the VDV-25 and list its spare parts.",      # drawing_search
-    "Which Schütze manuals and datasheets do we have in the collection?",     # list_documents
-    "Read the VDV-25 datasheet and give me all its technical data.",          # read_document
-    "Look up VDV-25 in the tables and give me its stock and price.",          # table_lookup
-    "How do I fix the leak?",                                               # vague -> clarify
+    "What is the VDV-25 dispensing valve and what is it used for?",
+    "What are the differences between the VDV-25 and another valve model?",
+    "What is the operating pressure range of the VDV-25, and its midpoint?",
+    "Show me the exploded view of the VDV-25 and list its spare parts.",
+    "Which Schütze manuals and datasheets do we have in the collection?",
+    "Read the VDV-25 datasheet and give me all its technical data.",
+    "Look up VDV-25 in the tables and give me its stock and price.",
+    "How do I fix the leak?",
 ]
-
 
 def my_agent_plan() -> dict:
     return {
@@ -1319,14 +1227,9 @@ def my_agent_plan() -> dict:
         "example_prompts": EXAMPLE_PROMPTS,
     }
 
-
-# ## Step 3 — evaluation: answer ONE user question with BOTH systems (fixed vs agent)
-
 def answer_query(llm: ChatOpenAI, retriever: HybridEvaluationRetriever,
                  agent: HybridGraphAgent, question: str) -> None:
-    """Run the fixed 3.1 pipeline AND the agent on one question, print + log both."""
     print("=" * 72)
-
     print("FIXED hybrid pipeline (Checkpoint 3.1 baseline):")
     base = fixed_pipeline_answer(llm, retriever, question)
     print(f"  {base}\n")
@@ -1344,9 +1247,7 @@ def answer_query(llm: ChatOpenAI, retriever: HybridEvaluationRetriever,
                  f"AGENT ({steps} steps):\n"
                  + "\n".join(final["transcript"]) + f"\n\nANSWER:\n{agent_ans}")
 
-
 def chat_loop(handler) -> None:
-    """Minimal command-line chat loop: reads input, calls handler(input)."""
     print("Type your question and press Enter. Type 'exit' or 'quit' to stop.\n")
     while True:
         try:
@@ -1363,7 +1264,6 @@ def chat_loop(handler) -> None:
             handler(user_input)
         except Exception as e:
             print(f"Error: {e}")
-
 
 def run() -> None:
     llm = make_llm()
@@ -1394,7 +1294,6 @@ def run() -> None:
     chat_loop(lambda q: answer_query(llm, retriever, agent, q))
 
     print(f"Done. Full transcripts saved to {LOG_PATH.name} for your report's evaluation.")
-
 
 if __name__ == "__main__":
     run()
