@@ -7,30 +7,29 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# --- 1. DESCARGAR Y EXTRAER ZIP DESDE GOOGLE DRIVE ---
-# ID del archivo datos_rag.zip de tu enlace de Drive
+# --- 1. DESCARGA RÁPIDA DEL ZIP EN LUGAR DE CARPETA ---
+# Sustituye este ID por el ID exacto de tu archivo datos_rag.zip en Drive
 DRIVE_ZIP_ID = "11lJDvthCF2dZXE2_q8kiJOLk8dNdADU6"
 
-# Comprobamos si la base de datos o la carpeta de datos ya existen en Render
-if not os.path.exists("chroma_db_eval_recursive") and not os.path.exists("data"):
-    print("Descargando archivo ZIP (300MB+) desde Google Drive...")
+if not os.path.exists("data"):
+    print("Descargando archivo comprimido datos_rag.zip desde Google Drive...")
     url = f"https://drive.google.com/uc?id={DRIVE_ZIP_ID}"
     zip_path = "datos_rag.zip"
     
     try:
-        # fuzzy=True salta la confirmación de escaneo de virus para archivos >100MB
+        # fuzzy=True salta la confirmación de escaneo de virus de Google para archivos grandes
         gdown.download(url, zip_path, quiet=False, fuzzy=True)
         
         if os.path.exists(zip_path):
-            print("Descomprimiendo estructura de archivos y base de datos...")
+            print("Descomprimiendo archivos en el servidor...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(".")  # Extrae 'data' y/o 'chroma_db_eval_recursive'
+                zip_ref.extractall(".")
             os.remove(zip_path)
-            print("¡Descarga y descompresión completadas con éxito!")
+            print("¡Archivos descomprimidos y listos!")
         else:
-            print("Error: No se pudo generar el archivo datos_rag.zip local.")
+            print("Error: No se encontró el archivo ZIP tras la descarga.")
     except Exception as e:
-        print(f"Error durante el proceso de descarga con gdown: {e}")
+        print(f"Error en la descarga/extracción: {e}")
 
 # --- 2. INICIALIZAR MOTOR RAG ---
 from checkpoint_5_1_hybrid_graph_flat import HybridEvaluationRetriever, HybridGraphAgent, make_llm
