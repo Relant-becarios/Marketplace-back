@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RELANT · Asistente RAG</title>
+<style>
+  :root{
+    --navy:#0f2b46; --navy2:#1e4976; --accent:#2f81f7; --accent2:#f59e0b;
+    --bg:#f3f6fa; --card:#ffffff; --border:#e3e8ef; --text:#1b2733; --muted:#64748b;
+    --user:#2f81f7; --err-bg:#fdecec; --err:#b42318; --ok:#16a34a;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%;}
+  body{
+    font-family:"Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+    background:var(--bg); color:var(--text); display:flex; flex-direction:column;
+  }
+  /* ---------- HEADER ---------- */
+  header{
+    background:linear-gradient(135deg, var(--navy), var(--navy2));
+    color:#fff; padding:14px 22px; display:flex; align-items:center; gap:14px;
+    box-shadow:0 2px 10px rgba(15,43,70,.25); position:sticky; top:0; z-index:10;
+  }
+  .logo{
+    width:42px; height:42px; border-radius:10px; background:var(--accent2);
+    display:flex; align-items:center; justify-content:center; font-weight:800;
+    font-size:20px; color:var(--navy); flex-shrink:0;
+  }
+  header h1{font-size:1.05rem; font-weight:700; letter-spacing:.3px;}
+  header .sub{font-size:.78rem; opacity:.85; margin-top:2px;}
+  .status{
+    margin-left:auto; display:flex; align-items:center; gap:8px;
+    font-size:.78rem; background:rgba(255,255,255,.12); padding:6px 12px; border-radius:999px;
+  }
+  .dot{width:9px; height:9px; border-radius:50%; background:#94a3b8;}
+  .dot.on{background:#4ade80; box-shadow:0 0 8px #4ade80;}
+  .dot.off{background:#f87171;}
+  /* ---------- CHAT ---------- */
+  main{
+    flex:1; overflow-y:auto; padding:26px 16px 20px;
+    display:flex; flex-direction:column; gap:18px;
+    max-width:980px; width:100%; margin:0 auto;
+  }
+  .welcome{
+    background:var(--card); border:1px solid var(--border); border-radius:16px;
+    padding:26px 28px; box-shadow:0 4px 14px rgba(15,43,70,.06);
+  }
+  .welcome h2{font-size:1.15rem; margin-bottom:8px;}
+  .welcome p{color:var(--muted); font-size:.92rem; line-height:1.55;}
+  .welcome .brands{margin-top:12px; display:flex; flex-wrap:wrap; gap:8px;}
+  .brand{
+    font-size:.75rem; font-weight:600; color:var(--navy2);
+    background:#e8f0fe; border:1px solid #c9dcfb; padding:5px 12px; border-radius:999px;
+  }
+  .msg{display:flex; flex-direction:column; max-width:88%;}
+  .msg.user{align-self:flex-end; align-items:flex-end;}
+  .msg.bot{align-self:flex-start; align-items:flex-start;}
+  .bubble{
+    padding:12px 16px; border-radius:16px; font-size:.93rem; line-height:1.6;
+    white-space:pre-wrap; word-wrap:break-word;
+  }
+  .msg.user .bubble{
+    background:var(--user); color:#fff; border-bottom-right-radius:4px;
+    box-shadow:0 3px 10px rgba(47,129,247,.3);
+  }
+  .card-answer{
+    background:var(--card); border:1px solid var(--border); border-radius:16px;
+    border-bottom-left-radius:4px; overflow:hidden;
+    box-shadow:0 4px 14px rgba(15,43,70,.07); width:100%;
+  }
+  .answer-sec{padding:14px 18px;}
+  .answer-sec + .answer-sec{border-top:1px solid var(--border);}
+  .answer-sec h3{
+    font-size:.7rem; text-transform:uppercase; letter-spacing:.11em;
+    color:var(--muted); margin-bottom:8px; display:flex; align-items:center; gap:7px;
+  }
+  .answer-sec .tag{
+    font-size:.65rem; font-weight:700; padding:2px 9px; border-radius:999px;
+  }
+  .tag.fixed{background:#eef2f7; color:#475569;}
+  .tag.agent{background:#e8f0fe; color:#1d4ed8;}
+  .answer-text{white-space:pre-wrap; word-wrap:break-word; font-size:.92rem; line-height:1.65;}
+  .meta-row{
+    display:flex; flex-wrap:wrap; gap:8px; padding:10px 18px;
+    background:#f8fafc; border-top:1px solid var(--border); font-size:.73rem; color:var(--muted);
+  }
+  .pill{
+    display:inline-flex; align-items:center; gap:5px; background:#fff;
+    border:1px solid var(--border); padding:3px 10px; border-radius:999px;
+  }
+  .pill.ext{background:#fff7e6; border-color:#fcd9a0; color:#92400e;}
+  /* ---------- IMÁGENES ---------- */
+  .imgs{padding:4px 18px 16px;}
+  .imgs h4{font-size:.72rem; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); margin:10px 0 10px;}
+  .img-grid{display:flex; flex-wrap:wrap; gap:10px;}
+  .img-grid a{
+    display:block; border:1px solid var(--border); border-radius:10px; overflow:hidden;
+    transition:transform .15s ease, box-shadow .15s ease; background:#fff;
+  }
+  .img-grid a:hover{transform:translateY(-3px) scale(1.02); box-shadow:0 8px 20px rgba(15,43,70,.18);}
+  .img-grid img{max-height:130px; max-width:220px; display:block; object-fit:contain; padding:6px;}
+  /* ---------- TRANSCRIPT ---------- */
+  details{padding:0 18px 14px; font-size:.8rem;}
+  summary{cursor:pointer; color:var(--muted); user-select:none;}
+  details pre{
+    margin-top:8px; background:#0f2b46; color:#cfe3ff; padding:12px; border-radius:10px;
+    overflow-x:auto; font-size:.72rem; line-height:1.5; white-space:pre-wrap;
+  }
+  /* ---------- LOADING / ERROR ---------- */
+  .loading .bubble{
+    background:#fff; border:1px solid var(--border); color:var(--muted);
+    display:flex; align-items:center; gap:10px; border-radius:16px; border-bottom-left-radius:4px;
+  }
+  .spinner{
+    width:17px; height:17px; border:3px solid var(--border); border-top-color:var(--accent);
+    border-radius:50%; animation:spin .8s linear infinite; flex-shrink:0;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .bubble.error{background:var(--err-bg); color:var(--err); border:1px solid #f5c2be;}
+  /* ---------- FOOTER ---------- */
+  footer{
+    background:#fff; border-top:1px solid var(--border); padding:12px 16px 16px;
+  }
+  .foot-inner{max-width:980px; margin:0 auto;}
+  .chips{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:11px;}
+  .chip{
+    font-size:.78rem; color:var(--navy2); background:#eef4ff; border:1px solid #cfe0ff;
+    padding:7px 13px; border-radius:999px; cursor:pointer; transition:all .15s ease;
+  }
+  .chip:hover{background:var(--accent); color:#fff; border-color:var(--accent);}
+  .input-row{display:flex; gap:10px; align-items:flex-end;}
+  textarea{
+    flex:1; resize:none; border:1.5px solid var(--border); border-radius:13px;
+    padding:12px 15px; font-size:.95rem; font-family:inherit; outline:none;
+    min-height:50px; max-height:150px; transition:border-color .15s;
+    background:#fbfdff;
+  }
+  textarea:focus{border-color:var(--accent); box-shadow:0 0 0 3px rgba(47,129,247,.15);}
+  button#send{
+    background:var(--accent); color:#fff; border:none; border-radius:13px;
+    padding:0 26px; height:50px; font-size:.95rem; font-weight:600; cursor:pointer;
+    transition:background .15s, transform .1s; white-space:nowrap;
+  }
+  button#send:hover{background:#1c6fe0;}
+  button#send:active{transform:scale(.97);}
+  button#send:disabled{background:#a9c4ec; cursor:not-allowed;}
+  .hint{font-size:.7rem; color:var(--muted); margin-top:8px; text-align:center;}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">R</div>
+  <div>
+    <h1>RELANT · Asistente RAG Técnico</h1>
+    <div class="sub">Abnox · Soma · Lubtec · Walther Systemtechnik — búsqueda híbrida + agente LangGraph</div>
+  </div>
+  <div class="status"><span class="dot" id="statusDot"></span><span id="statusTxt">conectando…</span></div>
+</header>
+
+<main id="chat">
+  <div class="welcome">
+    <h2>👋 ¿En qué te ayudo?</h2>
+    <p>Pregunta sobre válvulas, equipos de lubricación, manuales, fichas técnicas, dibujos,
+    capacitaciones, stock o catálogos. Cada pregunta se responde con el
+    <b>pipeline fijo (Checkpoint 3.1)</b> y con el <b>agente</b> para que compares,
+    y las <b>imágenes relacionadas</b> aparecen aquí mismo.</p>
+    <div class="brands">
+      <span class="brand">🔩 Abnox</span>
+      <span class="brand">💧 Soma</span>
+      <span class="brand">🛢️ Lubtec</span>
+      <span class="brand">⚙️ Walther Systemtechnik</span>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="foot-inner">
+    <div class="chips" id="chips">
+      <span class="chip">¿Qué es la válvula VDV-25 y para qué sirve?</span>
+      <span class="chip">Muéstrame los dibujos de las válvulas de medición AXDV</span>
+      <span class="chip">¿Cuál es el rango de presión de la VDV-25 y su punto medio?</span>
+      <span class="chip">¿Cómo reparo una fuga?</span>
+      <span class="chip">Resume las mejores prácticas de lubricación con grasas</span>
+    </div>
+    <div class="input-row">
+      <textarea id="q" rows="1" placeholder="Escribe tu pregunta… (Enter para enviar, Shift+Enter para nueva línea)"></textarea>
+      <button id="send">Preguntar</button>
+    </div>
+    <div class="hint">Las imágenes se abren en grande al hacer clic · Datos: Google Drive + sitios de las marcas</div>
+  </div>
+</footer>
+
+<script>
+  const chat = document.getElementById('chat');
+  const input = document.getElementById('q');
+  const sendBtn = document.getElementById('send');
+  let busy = false;
+
+  function esc(s){
+    return String(s ?? '').replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+  }
+
+  function scrollBottom(){ chat.scrollTop = chat.scrollHeight; }
+
+  function addUser(text){
+    const d = document.createElement('div');
+    d.className = 'msg user';
+    d.innerHTML = `<div class="bubble">${esc(text)}</div>`;
+    chat.appendChild(d); scrollBottom();
+  }
+
+  function addLoading(){
+    const d = document.createElement('div');
+    d.className = 'msg bot loading'; d.id = 'loadingMsg';
+    d.innerHTML = `<div class="bubble"><div class="spinner"></div>Buscando en la colección y redactando la respuesta…</div>`;
+    chat.appendChild(d); scrollBottom();
+  }
+
+  function removeLoading(){
+    const el = document.getElementById('loadingMsg');
+    if (el) el.remove();
+  }
+
+  function addError(text){
+    const d = document.createElement('div');
+    d.className = 'msg bot';
+    d.innerHTML = `<div class="bubble error">⚠️ ${esc(text)}</div>`;
+    chat.appendChild(d); scrollBottom();
+  }
+
+  function addAssistant(data){
+    const d = document.createElement('div');
+    d.className = 'msg bot';
+
+    const badges = [
+      `<span class="pill">⏱ ${esc(data.seconds ?? '?')} s</span>`,
+      `<span class="pill">🔢 ${esc(data.steps ?? '?')} pasos del agente</span>`,
+    ];
+    if (data.used_external) badges.push(`<span class="pill ext">🌐 usó herramienta externa</span>`);
+
+    let imgs = '';
+    if (data.image_urls && data.image_urls.length){
+      imgs = `<div class="imgs"><h4>🖼️ Imágenes relacionadas</h4><div class="img-grid">` +
+        data.image_urls.map((u,i) =>
+          `<a href="${esc(u)}" target="_blank" title="${esc((data.images && data.images[i]) || '')}">
+             <img src="${esc(u)}" alt="imagen relacionada" loading="lazy">
+           </a>`).join('') +
+        `</div></div>`;
+    }
+
+    let transcript = '';
+    if (data.transcript && data.transcript.length){
+      transcript = `<details><summary>📜 Ver pasos del agente (${data.transcript.length})</summary>
+        <pre>${esc(data.transcript.join('\n'))}</pre></details>`;
+    }
+
+    d.innerHTML = `
+      <div class="card-answer">
+        <div class="answer-sec">
+          <h3><span class="tag fixed">Pipeline fijo</span> Checkpoint 3.1</h3>
+          <div class="answer-text">${esc(data.fixed)}</div>
+        </div>
+        <div class="answer-sec">
+          <h3><span class="tag agent">Agente</span> LangGraph (ReAct)</h3>
+          <div class="answer-text">${esc(data.agent)}</div>
+        </div>
+        ${imgs}
+        <div class="meta-row">${badges.join('')}</div>
+        ${transcript}
+      </div>`;
+    chat.appendChild(d); scrollBottom();
+  }
+
+  async function ask(){
+    const q = input.value.trim();
+    if (!q || busy) return;
+    busy = true;
+    sendBtn.disabled = true;
+    addUser(q);
+    input.value = '';
+    addLoading();
+    try {
+      const r = await fetch('/api/ask', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({question: q}),
+      });
+      const data = await r.json();
+      removeLoading();
+      if (data.ok === false){
+        addError(data.error || 'Error desconocido en el servidor.');
+      } else {
+        addAssistant(data);
+      }
+    } catch (e) {
+      removeLoading();
+      addError('No se pudo conectar con el servidor. ¿Está corriendo "python servidor_web.py"? (' + e + ')');
+    }
+    busy = false;
+    sendBtn.disabled = false;
+    input.focus();
+  }
+
+  sendBtn.addEventListener('click', ask);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); ask(); }
+  });
+
+  document.getElementById('chips').addEventListener('click', e => {
+    if (e.target.classList.contains('chip')){
+      input.value = e.target.textContent;
+      ask();
+    }
+  });
+
+  // auto-resize del textarea
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 150) + 'px';
+  });
+
+  // estado de conexión
+  async function checkHealth(){
+    const dot = document.getElementById('statusDot');
+    const txt = document.getElementById('statusTxt');
+    try {
+      const r = await fetch('/api/health');
+      const j = await r.json();
+      if (j.ok){ dot.className = 'dot on'; txt.textContent = 'servidor conectado'; }
+      else { dot.className = 'dot off'; txt.textContent = 'servidor con problemas'; }
+    } catch {
+      dot.className = 'dot off'; txt.textContent = 'sin conexión al servidor';
+    }
+  }
+  checkHealth();
+  setInterval(checkHealth, 15000);
+  input.focus();
+</script>
+</body>
+</html>
