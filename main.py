@@ -1,4 +1,5 @@
 import os
+import zipfile
 import gdown
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
@@ -6,21 +7,32 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# --- 1. DESCARGAR CARPETA CON SUBCARPETAS DESDE DRIVE ---
-DRIVE_FOLDER_ID = "1EiVkJHCb7M2K7AFmYbry8ty4Gk-acVLC"
+# --- 1. DESCARGAR Y EXTRAER ZIP DESDE GOOGLE DRIVE ---
+# ID del archivo datos_rag.zip de tu enlace de Drive
+DRIVE_ZIP_ID = "11lJDvthCF2dZXE2_q8kiJOLk8dNdADU6"
 
-os.makedirs("data", exist_ok=True)
-
-if not os.path.exists("chroma_db_eval_recursive"):
-    print("Descargando archivos y subcarpetas desde Google Drive...")
+# Comprobamos si la base de datos o la carpeta de datos ya existen en Render
+if not os.path.exists("chroma_db_eval_recursive") and not os.path.exists("data"):
+    print("Descargando archivo ZIP (300MB+) desde Google Drive...")
+    url = f"https://drive.google.com/uc?id={DRIVE_ZIP_ID}"
+    zip_path = "datos_rag.zip"
+    
     try:
-        # gdown descarga la carpeta y respeta la estructura de subcarpetas interna
-        gdown.download_folder(id=DRIVE_FOLDER_ID, output="data", quiet=False, use_cookies=False)
-        print("¡Todos los archivos y subcarpetas descargados con éxito!")
+        # fuzzy=True salta la confirmación de escaneo de virus para archivos >100MB
+        gdown.download(url, zip_path, quiet=False, fuzzy=True)
+        
+        if os.path.exists(zip_path):
+            print("Descomprimiendo estructura de archivos y base de datos...")
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(".")  # Extrae 'data' y/o 'chroma_db_eval_recursive'
+            os.remove(zip_path)
+            print("¡Descarga y descompresión completadas con éxito!")
+        else:
+            print("Error: No se pudo generar el archivo datos_rag.zip local.")
     except Exception as e:
-        print(f"Error al descargar la carpeta: {e}")
+        print(f"Error durante el proceso de descarga con gdown: {e}")
 
-# --- 2. INICIALIZAR EL MOTOR RAG ---
+# --- 2. INICIALIZAR MOTOR RAG ---
 from checkpoint_5_1_hybrid_graph_flat import HybridEvaluationRetriever, HybridGraphAgent, make_llm
 
 PDF_DIR = "./data"
@@ -35,13 +47,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-print("Inicializando Motor RAG e indexando recursivamente...")
+print("Inicializando Motor RAG...")
 llm = make_llm()
 retriever = HybridEvaluationRetriever(pdf_dir=PDF_DIR, top_k=10)
 agent = HybridGraphAgent(llm, retriever)
 print("Motor RAG listo.")
 
 # --- 3. RUTAS DE LA API ---
+
 @app.get("/")
 @app.get("/asistente")
 async def serve_interfaz():
@@ -60,10 +73,10 @@ async def ask_question(req: QuestionRequest):
         return {
             "ok": True,
             "agent": result.get("answer", "No se generó respuesta."),
-            "fixed": "(Pipeline fijo deshabilitado)",
+            "fixed": "(Pipeline fijo deshabilitado en producción)",
             "steps": result.get("iterations", 0),
             "transcript": result.get("transcript", []),
-            "used_external": any("web_paper_search" in t for t in result.get("transcript", [])),
+            "used_external": any("web_paper_search" in t or "calculator" in t for t in result.get("transcript", [])),
             "image_urls": [],
         }
     except Exception as e:
