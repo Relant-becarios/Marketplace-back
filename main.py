@@ -14,7 +14,7 @@ DRIVE_ZIP_ID = "11lJDvthCF2dZXE2_q8kiJOLk8dNdADU6"
 if not os.path.exists("data"):
     print("Descargando archivo comprimido datos_rag.zip desde Google Drive...")
     #url = f"https://drive.google.com/uc?id={DRIVE_ZIP_ID}"
-    url = https://drive.google.com/drive/folders/{DRIVE_ZIP_ID}"
+    url = f"https://drive.google.com/drive/folders/{DRIVE_ZIP_ID}"
     zip_path = "datos_rag.zip"
     
     try:
