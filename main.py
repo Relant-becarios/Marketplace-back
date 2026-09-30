@@ -1,28 +1,27 @@
 import os
+import shutil
 import zipfile
 import gdown
+from typing import List
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# --- 1. DESCARGA RÁPIDA DEL ZIP EN LUGAR DE CARPETA ---
-# Sustituye este ID por el ID exacto de tu archivo datos_rag.zip en Drive
+# 1. DESCARGA Y EXTRAE EL ZIP DESDE GOOGLE DRIVE AL ARRANCAR
 DRIVE_ZIP_ID = "11lJDvthCF2dZXE2_q8kiJOLk8dNdADU6"
 
 if not os.path.exists("data"):
     print("Descargando archivo comprimido datos_rag.zip desde Google Drive...")
-    #url = f"https://drive.google.com/uc?id={DRIVE_ZIP_ID}"
-    url = f"https://drive.google.com/drive/folders/{DRIVE_ZIP_ID}"
+    url = f"https://drive.google.com/uc?id={DRIVE_ZIP_ID}"
     zip_path = "datos_rag.zip"
     
     try:
-        # fuzzy=True salta la confirmación de escaneo de virus de Google para archivos grandes
-        gdown.download(url, zip_path, quiet=False, fuzzy=True)
+        gdown.download(url, zip_path, quiet=False)
         
         if os.path.exists(zip_path):
-            print("Descomprimiendo archivos en el servidor...")
+            print("Descomprimiendo estructura de archivos en el servidor...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(".")
             os.remove(zip_path)
@@ -30,15 +29,14 @@ if not os.path.exists("data"):
         else:
             print("Error: No se encontró el archivo ZIP tras la descarga.")
     except Exception as e:
-        print(f"Error en la descarga/extracción: {e}")
+        print(f"Error en la descarga o extracción desde Drive: {e}")
 
-# --- 2. INICIALIZAR MOTOR RAG ---
-from checkpoint_5_1_hybrid_graph_flat import HybridEvaluationRetriever, HybridGraphAgent, make_llm
-
-PDF_DIR = "./data"
+# Importamos tu motor RAG tras garantizar que la carpeta data exista
+from checkpoint_5_1_hybrid_graph_flat import HybridEvaluationRetriever, HybridGraphAgent, make_llm, PDF_DIR
 
 app = FastAPI(title="Relant RAG API")
 
+# Configuración de CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -47,13 +45,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Inicializar el motor RAG
 print("Inicializando Motor RAG...")
 llm = make_llm()
 retriever = HybridEvaluationRetriever(pdf_dir=PDF_DIR, top_k=10)
 agent = HybridGraphAgent(llm, retriever)
 print("Motor RAG listo.")
 
-# --- 3. RUTAS DE LA API ---
+# --- RUTAS DE LA INTERFAZ HTML Y API ---
 
 @app.get("/")
 @app.get("/asistente")
@@ -81,6 +80,36 @@ async def ask_question(req: QuestionRequest):
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+@app.post("/api/upload")
+async def upload_files(files: List[UploadFile] = File(...)):
+    allowed_extensions = {
+        ".pdf", ".csv", ".xlsx", ".xls", ".pptx", ".ppt",
+        ".docx", ".doc", ".png", ".jpg", ".jpeg", ".txt", ".md"
+    }
+    saved_files = []
+    
+    os.makedirs(PDF_DIR, exist_ok=True)
+    
+    for file in files:
+        ext = Path(file.filename).suffix.lower()
+        if ext not in allowed_extensions:
+            continue
+            
+        target_dir = Path(PDF_DIR)
+        if ext in {".png", ".jpg", ".jpeg"}:
+            target_dir = target_dir / "drawings"
+            os.makedirs(target_dir, exist_ok=True)
+            
+        file_path = target_dir / file.filename
+        
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        saved_files.append(file.filename)
+        
+    retriever._sync_and_index()
+    return {"message": f"{len(saved_files)} archivos subidos e indexados con éxito.", "files": saved_files}
 
 @app.get("/api/health")
 async def health_check():
