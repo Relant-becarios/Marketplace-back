@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # 1. DESCARGA Y EXTRAE EL ZIP DESDE GOOGLE DRIVE AL ARRANCAR
-DRIVE_ZIP_ID = "11lJDvthCF2dZXE2_q8kiJOLk8dNdADU6"
+DRIVE_ZIP_ID = "1qOw8X3GZ-28KSTdhdroU9H8JxKjd6s-j"
 
 if not os.path.exists("data"):
     print("Descargando archivo comprimido datos_rag.zip desde Google Drive...")
